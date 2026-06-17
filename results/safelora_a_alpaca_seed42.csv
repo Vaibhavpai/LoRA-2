@@ -1,2 +1,2 @@
 step,variant,refusal_rate,alpaca_val_loss,mean_alignment
-2000,safelora_a,0.6,1.3449988096517445,3.824368052716766e-07
+2000,safelora_a,0.6,1.344998904432662,3.859001610960279e-07

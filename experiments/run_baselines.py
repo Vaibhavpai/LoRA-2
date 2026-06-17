@@ -192,7 +192,7 @@ def run_variant_a(args, project_root: Path):
     base_model = AutoModelForCausalLM.from_pretrained(
         model_id, torch_dtype=torch.float32, low_cpu_mem_usage=True
     )
-    model = PeftModel.from_pretrained(base_model, adapter_path)
+    model = PeftModel.from_pretrained(base_model, str(adapter_path))
     model.to(device)
 
     # 3. Apply SafeLoRA post-hoc projection (ONCE, to final weights)

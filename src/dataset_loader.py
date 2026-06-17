@@ -142,7 +142,7 @@ def load_alpaca_train(num_examples: int = 5000, seed: int = 42) -> list[dict]:
     return subset
 
 
-def load_alpaca_val(num_examples: int = 500, seed: int = 42) -> list[dict]:
+def load_alpaca_val(num_examples: int = 500, seed: int = 42, train_size: int = 5000) -> list[dict]:
     """
     Load a fixed validation subset of Alpaca for capability evaluation.
 
@@ -151,8 +151,9 @@ def load_alpaca_val(num_examples: int = 500, seed: int = 42) -> list[dict]:
     during fine-tuning. No ground-truth extraction needed — loss is the metric.
 
     Important:
-        Uses a different random seed offset (seed + 1) internally to ensure
-        these 500 examples do NOT overlap with the 5,000 training examples.
+        First replays the training-set sampling (same seed) to identify which
+        indices were selected for training, then samples validation only from
+        the remaining examples. This guarantees zero overlap.
     """
     print(f"[dataset_loader] Loading Alpaca validation ({num_examples} examples)...")
     dataset = load_dataset("tatsu-lab/alpaca", split="train")
@@ -164,10 +165,16 @@ def load_alpaca_val(num_examples: int = 500, seed: int = 42) -> list[dict]:
         prompt = f"{instruction}\n{inp}" if inp else instruction
         all_examples.append({"prompt": prompt, "output": row["output"].strip()})
 
-    # Use a different seed to get a non-overlapping subset from training
+    # Replay the training-set sampling to find which indices were used
+    all_indices = list(range(len(all_examples)))
+    random.seed(seed)
+    train_indices = set(random.sample(all_indices, min(train_size, len(all_indices))))
+
+    # Sample validation only from examples NOT in the training set
+    remaining = [ex for i, ex in enumerate(all_examples) if i not in train_indices]
     random.seed(seed + 1)
-    val_subset = random.sample(all_examples, min(num_examples, len(all_examples)))
-    print(f"[dataset_loader] Alpaca val: {len(val_subset)} examples loaded.")
+    val_subset = random.sample(remaining, min(num_examples, len(remaining)))
+    print(f"[dataset_loader] Alpaca val: {len(val_subset)} examples (zero overlap with train).")
     return val_subset
 
 
