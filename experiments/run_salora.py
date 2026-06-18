@@ -229,24 +229,24 @@ def run_salora(args, project_root: Path):
         model_id, torch_dtype=dtype, low_cpu_mem_usage=True
     ).to(device)
 
-    # Load harmful + safe prompts for direction extraction
-    harmful_for_extraction = load_advbench()[:300]
-    safe_for_extraction = load_safe_prompts(num_examples=300)
+    # Load harmful prompts for direction extraction (70% of 520 = 364)
+    harmful_for_extraction = load_advbench()[:364]
 
     per_layer_directions = extract_per_layer_directions(
         model=base_model_for_extraction,
         tokenizer=tokenizer,
         harmful_prompts=harmful_for_extraction,
-        safe_prompts=safe_for_extraction,
         target_modules=("q_proj", "v_proj"),
-        r_s=5,
+        r_s=32,
         device=device,
-        max_prompts=300,
+        max_prompts=364,
     )
     logger.info(f"Extracted {len(per_layer_directions)} per-layer direction sets")
 
     # Free the extraction model to make room for the PEFT model
     del base_model_for_extraction
+    import gc
+    gc.collect()
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     # Also load Phase 3 safety directions for the alignment metric
@@ -260,6 +260,9 @@ def run_salora(args, project_root: Path):
         collate_fn=lambda b: training_collate_fn(b, tokenizer),
         generator=generator,
     )
+    # Free raw_train to save memory
+    del raw_train
+    gc.collect()
     logger.info(f"Training examples: {len(train_dataset)}")
 
     # -------------------------------------------------------------------

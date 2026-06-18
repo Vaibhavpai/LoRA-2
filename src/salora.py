@@ -40,9 +40,9 @@ logger = logging.getLogger(__name__)
 # ===========================================================================
 
 class _ActivationCapture:
-    """Captures input activations at a module."""
+    """Captures input activations at a module and accumulates their uncentered covariance online."""
     def __init__(self):
-        self.activations = []
+        self.cov = None
         self.hook = None
 
     def register(self, module):
@@ -50,25 +50,31 @@ class _ActivationCapture:
 
     def _hook_fn(self, module, input_args, output):
         # input_args[0] shape: [batch, seq_len, d_in]
-        x = input_args[0].detach().float()
-        # Flatten batch and seq dimensions: [batch*seq, d_in]
-        self.activations.append(x.reshape(-1, x.shape[-1]))
+        # Flatten batch and seq_len dimensions: [N, d_in]
+        x = input_args[0].detach().float().cpu()
+        x_flat = x.reshape(-1, x.shape[-1])
+        
+        # cov is X_h^T X_h. Accumulate online to save huge amounts of memory.
+        # This keeps the memory footprint to just [d_in, d_in] instead of [N, d_in].
+        batch_cov = x_flat.T @ x_flat
+        
+        if self.cov is None:
+            self.cov = batch_cov
+        else:
+            self.cov += batch_cov
 
     def remove(self):
         if self.hook is not None:
             self.hook.remove()
 
-    def get_concatenated(self):
-        if not self.activations:
-            return None
-        return torch.cat(self.activations, dim=0)
+    def get_covariance(self):
+        return self.cov
 
 
 def extract_per_layer_directions(
     model,
     tokenizer,
     harmful_prompts: list[str],
-    safe_prompts: list[str],
     target_modules: tuple[str, ...] = ("q_proj", "v_proj"),
     r_s: int = 5,
     device: str = "cuda",
@@ -79,7 +85,7 @@ def extract_per_layer_directions(
     Extracts per-layer safety directions U_C as described in the SaLoRA paper.
 
     For each (layer, proj_name):
-      1. Collect input activations X_h from harmful + safe prompts
+      1. Collect input activations X_h from harmful prompts ONLY
       2. Compute output features: Y_h = W @ X_h^T  (shape [d_out, N])
       3. SVD of Y_h -> take top-r_s left singular vectors = U_C
       4. Build C = I - U_C @ U_C^T
@@ -88,7 +94,6 @@ def extract_per_layer_directions(
         model           : Base model (NOT PEFT-wrapped yet).
         tokenizer       : Tokenizer for the model.
         harmful_prompts : List of harmful instruction strings.
-        safe_prompts    : List of safe counterpart strings.
         target_modules  : Which projection layers to extract for.
         r_s             : Safety rank (number of directions to keep).
         device          : Device string.
@@ -101,16 +106,59 @@ def extract_per_layer_directions(
     """
     logger.info(
         f"Extracting per-layer SaLoRA directions (r_s={r_s}, "
-        f"max_prompts={max_prompts})..."
+        f"max_prompts={max_prompts}) using pure HARMFUL subspace..."
     )
 
     # Limit to max_prompts
-    harmful = harmful_prompts[:max_prompts]
-    safe = safe_prompts[:max_prompts]
-    all_prompts = harmful + safe
-    logger.info(f"Using {len(harmful)} harmful + {len(safe)} safe = {len(all_prompts)} prompts")
+    all_prompts = harmful_prompts[:max_prompts]
+    logger.info(f"Using {len(all_prompts)} harmful prompts")
 
     model.eval()
+
+    # Pre-generate safe responses BEFORE attaching hooks
+    # We cache these because generation takes several minutes and is deterministic.
+    import os
+    from pathlib import Path
+    
+    # Path handling robust to where the script is run from
+    project_root = Path(os.path.abspath(__file__)).parent.parent
+    data_dir = project_root / "data"
+    data_dir.mkdir(exist_ok=True)
+    cache_file = data_dir / f"salora_conversations_cache_{max_prompts}.pt"
+    
+    if cache_file.exists():
+        logger.info(f"Loading cached safe responses from {cache_file}...")
+        full_conversations_ids = torch.load(cache_file, map_location=device)
+    else:
+        logger.info(f"Generating safe responses for {len(all_prompts)} harmful prompts...")
+        logger.info("This will take a few minutes but will be cached for future runs.")
+        full_conversations_ids = []
+        
+        with torch.no_grad():
+            for i, prompt in enumerate(all_prompts):
+                formatted = tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    tokenize=False, add_generation_prompt=True,
+                )
+                inputs = tokenizer(
+                    formatted, return_tensors="pt",
+                    max_length=max_length, truncation=True,
+                ).to(device)
+                
+                # Generate the response (Qwen is aligned, so it will refuse)
+                outputs = model.generate(
+                    **inputs, max_new_tokens=64, 
+                    pad_token_id=tokenizer.eos_token_id, 
+                    do_sample=False
+                )
+                full_conversations_ids.append(outputs[0])
+                
+                if (i + 1) % 50 == 0:
+                    logger.info(f"  Generated {i + 1}/{len(all_prompts)} responses")
+        
+        # Save to cache
+        logger.info(f"Saving generated responses to cache: {cache_file}")
+        torch.save(full_conversations_ids, cache_file)
 
     # Identify all target layers
     num_layers = model.config.num_hidden_layers
@@ -127,22 +175,17 @@ def extract_per_layer_directions(
 
     logger.info(f"Registered {len(captures)} activation captures")
 
-    # Run all prompts through the model to collect activations
+    # Run all full conversations through the model to collect activations
+    logger.info("Passing full conversations through the model to capture activations...")
     with torch.no_grad():
-        for i, prompt in enumerate(all_prompts):
-            formatted = tokenizer.apply_chat_template(
-                [{"role": "user", "content": prompt}],
-                tokenize=False, add_generation_prompt=True,
-            )
-            inputs = tokenizer(
-                formatted, return_tensors="pt",
-                max_length=max_length, truncation=True,
-            ).to(device)
+        for i, input_ids in enumerate(full_conversations_ids):
+            # input_ids is 1D, shape it to [1, seq_len]
+            inputs = {"input_ids": input_ids.unsqueeze(0).to(device)}
 
             model(**inputs)
 
             if (i + 1) % 100 == 0:
-                logger.info(f"  Processed {i + 1}/{len(all_prompts)} prompts")
+                logger.info(f"  Processed {i + 1}/{len(full_conversations_ids)} conversations")
 
     # Remove hooks
     for cap in captures.values():
@@ -152,8 +195,8 @@ def extract_per_layer_directions(
     per_layer_directions = {}
 
     for (layer_idx, proj_name), cap in captures.items():
-        X_h = cap.get_concatenated()  # [N, d_in]
-        if X_h is None or X_h.shape[0] == 0:
+        cov = cap.get_covariance()  # [d_in, d_in]
+        if cov is None:
             logger.warning(f"No activations for layer {layer_idx} {proj_name}")
             continue
 
@@ -162,36 +205,41 @@ def extract_per_layer_directions(
         proj_module = getattr(layer.self_attn, proj_name)
         W = proj_module.weight.detach().float().to(device)
         d_out, d_in = W.shape
+        
+        cov = cov.to(device)
 
-        # Compute output features: Y_h = W @ X_h^T -> [d_out, N]
-        X_h = X_h.to(device)
-        Y_h = W @ X_h.T  # [d_out, N]
+        # We want the left singular vectors of Y_h = W @ X_h^T.
+        # These are exactly the eigenvectors of Y_h Y_h^T.
+        # Y_h Y_h^T = (W @ X_h^T) @ (X_h @ W^T) = W @ (X_h^T @ X_h) @ W^T = W @ cov @ W^T
+        Y_h_cov = W @ cov @ W.T  # [d_out, d_out]
 
-        # SVD of Y_h to get top-r_s left singular vectors
-        actual_r_s = min(r_s, d_out, Y_h.shape[1])
-        U, S, _ = torch.svd_lowrank(Y_h, q=actual_r_s)
-        U_C = U[:, :actual_r_s]  # [d_out, r_s]
+        # Eigen decomposition (since Y_h_cov is symmetric positive semi-definite)
+        # eigh returns eigenvalues in ascending order, eigenvectors in columns.
+        eigenvalues, eigenvectors = torch.linalg.eigh(Y_h_cov)
+        
+        # Take the top r_s eigenvectors (the last r_s columns)
+        actual_r_s = min(r_s, d_out)
+        U_C = eigenvectors[:, -actual_r_s:]  # [d_out, actual_r_s]
+        
+        # Optionally, flip the order so the largest is first (like SVD output)
+        U_C = torch.flip(U_C, dims=[1])
 
         per_layer_directions[(layer_idx, proj_name)] = U_C.cpu()
 
         logger.debug(
             f"Layer {layer_idx} {proj_name}: W=[{d_out},{d_in}], "
-            f"X_h=[{X_h.shape[0]},{d_in}], U_C=[{U_C.shape[0]},{U_C.shape[1]}], "
-            f"top singular values: {S[:actual_r_s].tolist()}"
+            f"U_C=[{U_C.shape[0]},{U_C.shape[1]}]"
         )
 
         # Free memory
-        del X_h, Y_h, U, S
+        del cov, Y_h_cov, eigenvalues, eigenvectors
+        cap.cov = None
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     logger.info(
         f"Extracted {len(per_layer_directions)} per-layer direction sets "
         f"(r_s={r_s})"
     )
-
-    # Free all captured activations
-    for cap in captures.values():
-        cap.activations.clear()
 
     return per_layer_directions
 
