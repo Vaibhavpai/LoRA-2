@@ -2,4 +2,3 @@
 __pycache__/
 *.pyc
 scratch.py
-models/safety_directions.pt

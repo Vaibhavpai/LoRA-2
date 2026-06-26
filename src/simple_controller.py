@@ -1,95 +1,85 @@
 import torch
 import logging
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-class SimpleAdaptiveController:
-    """
-    Rule-Based Training Controller for Phase 5 (Baseline 4).
-    Adjusts the constraint lambda uniformly across all layers based on refusal rate.
-    """
-    def __init__(self, initial_lambda: float = 0.3, delta: float = 0.05, 
-                 target_min: float = 0.82, target_max: float = 0.92):
-        self.current_lambda = initial_lambda
-        self.delta = delta
-        self.target_min = target_min
-        self.target_max = target_max
-        self.lambda_history = []
+@dataclass
+class ControllerConfig:
+    threshold_low: float = 0.85
+    threshold_high: float = 0.95
+    delta: float = 0.05
 
-    def update(self, refusal_rate: float) -> float:
+class FeedbackController:
+    """
+    Phase 5: A reactive, threshold-based incremental controller (B4).
+    Dynamically scales the SaLoRA-style safety projection based on observed refusal rates.
+    """
+    def __init__(self, model, safety_directions, config=None):
+        self.config = config or ControllerConfig()
+        self.current_alpha = 0.0
+        self.hooks = []
+        self._register_hooks(model, safety_directions)
+        
+    def step(self, refusal_rate):
         """
-        Updates the uniform lambda based on the current refusal rate.
-        Returns the new lambda value.
+        Updates the internal alpha based on the measured refusal rate.
+        This is called once every evaluation cycle.
         """
-        if refusal_rate < self.target_min:
-            # Too much drift, tighten constraint
-            new_lambda = self.current_lambda + self.delta
-        elif refusal_rate > self.target_max:
-            # Over-constrained, relax constraint
-            new_lambda = self.current_lambda - self.delta
+        if refusal_rate < self.config.threshold_low:
+            new_alpha = self.current_alpha + self.config.delta
+        elif refusal_rate > self.config.threshold_high:
+            new_alpha = self.current_alpha - self.config.delta
         else:
-            # In dead zone, no change
-            new_lambda = self.current_lambda
-
-        # Clamp to [0, 1]
-        self.current_lambda = max(0.0, min(1.0, new_lambda))
-        self.lambda_history.append(self.current_lambda)
-        
-        logger.info(f"Controller Update: Refusal={refusal_rate:.3f} | "
-                    f"New Lambda={self.current_lambda:.3f}")
-        return self.current_lambda
-
-
-def get_lora_A_param(model, layer_idx: int):
-    """
-    Helper to extract the specific parameter tensor for lora_A from a PEFT model.
-    """
-    # model.base_model.model.model.layers[layer_idx].self_attn.q_proj.lora_A.default.weight
-    # Depending on target_modules, we need to apply to both q_proj and v_proj
-    q_proj_A = model.base_model.model.model.layers[layer_idx].self_attn.q_proj.lora_A.default.weight
-    v_proj_A = model.base_model.model.model.layers[layer_idx].self_attn.v_proj.lora_A.default.weight
-    return [q_proj_A, v_proj_A]
-
-
-def register_gradient_hooks(model, safety_directions, lambda_state: dict, device: str):
-    """
-    Registers right-multiply backward hooks on lora_A parameters for all layers.
-    
-    Args:
-        model: The PEFT model.
-        safety_directions: Dict mapping layer_idx -> tensor [d_model, k]
-        lambda_state: Dict mapping layer_idx -> float. This is a mutable reference 
-                      that the hooks will read from on every backward pass.
-        device: Device string.
-    Returns:
-        List of hook handles.
-    """
-    handles = []
-    
-    for layer_idx_str, U_l in safety_directions.items():
-        layer_idx = int(layer_idx_str)
-        
-        # Precompute P_l = U_l @ U_l.T outside the hook
-        P_l = (U_l @ U_l.T).detach()
-        P_l = P_l.requires_grad_(False)
-        P_l = P_l.to(device)
-        
-        # We need a closure factory to capture the layer_idx correctly
-        def make_hook(l_idx, proj_mat):
-            def hook_fn(grad):
-                lam = lambda_state.get(l_idx, 0.0)
-                # grad is shape [r, d_in]
-                # proj_mat is shape [d_in, d_in]
-                # result is [r, d_in]
-                return grad - lam * (grad @ proj_mat)
-            return hook_fn
-        
-        try:
-            params = get_lora_A_param(model, layer_idx)
-            for param in params:
-                handle = param.register_hook(make_hook(layer_idx, P_l))
-                handles.append(handle)
-        except Exception as e:
-            logger.error(f"Failed to register hook on layer {layer_idx}: {e}")
+            new_alpha = self.current_alpha
             
-    return handles
+        self.current_alpha = max(0.0, min(1.0, new_alpha))
+        
+        # Avoid floating point precision issues near 0 and 1
+        if self.current_alpha < 1e-5:
+            self.current_alpha = 0.0
+        elif self.current_alpha > 0.99999:
+            self.current_alpha = 1.0
+            
+        logger.info(f"[FeedbackController] Refusal Rate: {refusal_rate:.3f} | Updated Alpha: {self.current_alpha:.3f}")
+        return self.current_alpha
+        
+    def _register_hooks(self, model, safety_directions):
+        for name, module in model.named_modules():
+            # In PEFT, lora_A and lora_B are ParameterDicts / ModuleDicts
+            if hasattr(module, "lora_A") and hasattr(module, "lora_B"):
+                adapter_name = "default"
+                if adapter_name not in module.lora_A:
+                    continue
+                    
+                match_key = None
+                for k in safety_directions.keys():
+                    if k in name:
+                        match_key = k
+                        break
+                
+                if match_key is None:
+                    continue
+                    
+                V_base = safety_directions[match_key]
+                lora_A = module.lora_A[adapter_name]
+                
+                # The hook modifies the input `x` dynamically based on `self.current_alpha`
+                def pre_hook(mod, args, V_base=V_base):
+                    x = args[0]
+                    # Fast path: if alpha is 0, skip the matrix multiplication
+                    if self.current_alpha == 0.0:
+                        return (x,)
+                        
+                    V = V_base.to(device=x.device, dtype=x.dtype)
+                    
+                    # x_proj = x - alpha * (x @ V) @ V^T
+                    x_V = torch.matmul(x, V)
+                    x_proj = x - self.current_alpha * torch.matmul(x_V, V.T)
+                    
+                    return (x_proj,)
+                    
+                hook_handle = lora_A.register_forward_pre_hook(pre_hook)
+                self.hooks.append(hook_handle)
+                
+        logger.info(f"[FeedbackController] Registered {len(self.hooks)} dynamic hooks.")

@@ -303,11 +303,11 @@ def evaluate_task_alpaca(
 
 def compute_subspace_alignment(
     model,
-    safety_directions: dict[int, torch.Tensor]
-) -> dict[int, float]:
+    safety_directions: dict[str, torch.Tensor]
+) -> dict[str, float]:
     """
     Computes the cosine alignment of the top right singular vector of the LoRA weight
-    update matrix Delta W_l with the top-1 safety direction at each layer.
+    update matrix Delta W_l with the top-1 safety direction at each module.
 
     OFFICIAL PAPER METRIC — DO NOT MODIFY.
 
@@ -315,49 +315,44 @@ def compute_subspace_alignment(
         Alignment = | sigma_1(Delta W_l) · u_1^safety |
 
     Where:
-        sigma_1(Delta W_l) = top right singular vector of Delta W_l = B_l A_l,
+        sigma_1(Delta W_l) = top right singular vector of Delta W_l = (B_l A_l) * scaling,
                              in R^{d_model}
         u_1^safety         = top right singular vector of the safety direction matrix
                              (first column of the [d_model, k] tensor), in R^{d_model}
         |·|                = absolute value to handle sign ambiguity of singular vectors
-
-    Args:
-        model             : The fine-tuned PEFT model.
-        safety_directions : Dict mapping layer_idx -> safety directions tensor
-                            of shape [d_model, k].
-
-    Returns:
-        dict[int, float] : Dict mapping layer_idx -> alignment score in [0, 1].
     """
     alignments = {}
+    named_modules = dict(model.named_modules())
 
-    for layer_idx, directions in safety_directions.items():
+    for key, directions in safety_directions.items():
         try:
-            q_proj = model.base_model.model.model.layers[layer_idx].self_attn.q_proj
+            target_module = None
+            for name, mod in named_modules.items():
+                if key in name and hasattr(mod, "lora_A"):
+                    target_module = mod
+                    break
+            
+            if target_module is None:
+                alignments[key] = 0.0
+                continue
 
-            lora_A = q_proj.lora_A.default.weight.detach().to(torch.float32)  # [r, d_in]
-            lora_B = q_proj.lora_B.default.weight.detach().to(torch.float32)  # [d_out, r]
+            lora_A = target_module.lora_A["default"].weight.detach().to(torch.float32)  
+            lora_B = target_module.lora_B["default"].weight.detach().to(torch.float32)  
+            scaling = target_module.scaling.get("default", 1.0)
 
-            # delta_W = B @ A,  shape: [d_out, d_in]
-            delta_W = lora_B @ lora_A
+            delta_W = (lora_B @ lora_A) * scaling
 
-            # SVD of Delta W: right singular vectors in R^{d_in} = R^{d_model}
             _, _, Vh = torch.linalg.svd(delta_W, full_matrices=False)
-            top_right_vector = Vh[0]  # shape: [d_model]
+            top_right_vector = Vh[0]  
 
-            # Top-1 safety direction: first column of the saved direction matrix
             top_safety_dir = directions[:, 0].to(torch.float32).to(top_right_vector.device)
 
-            # Official metric: |v1 · u1|
             alignment = torch.abs(torch.dot(top_right_vector, top_safety_dir)).item()
-            alignments[layer_idx] = alignment
+            alignments[key] = alignment
 
-        except AttributeError:
-            # Base model has no LoRA; alignment is undefined → 0.0
-            alignments[layer_idx] = 0.0
         except Exception as e:
-            logger.error(f"Error computing subspace alignment for layer {layer_idx}: {e}")
-            alignments[layer_idx] = 0.0
+            logger.error(f"Error computing subspace alignment for module {key}: {e}")
+            alignments[key] = 0.0
 
     return alignments
 
@@ -368,37 +363,13 @@ def compute_subspace_alignment(
 
 def compute_subspace_alignment_full(
     model,
-    safety_directions: dict[int, torch.Tensor],
-) -> dict[int, dict]:
-    """
-    Diagnostic extension of compute_subspace_alignment.
-
-    For each layer, computes alignment between the top right singular vector of
-    Delta W_l and EACH of the k extracted safety directions.
-
-    This is a diagnostics-only function. The official paper metric is still
-    |v1 · u1|, which is preserved as the 'official' key in each layer's dict
-    and is numerically identical to compute_subspace_alignment().
-
-    Args:
-        model             : The fine-tuned PEFT model.
-        safety_directions : Dict mapping layer_idx -> [d_model, k] tensor.
-
-    Returns:
-        dict[int, dict] where each value has:
-            'official'  : float  — official paper metric |v1 · u1| (same as
-                                   compute_subspace_alignment)
-            'per_dir'   : list[float] — |v1 · u_j| for j = 1..k
-            'mean_k'    : float  — mean across k directions
-            'max_k'     : float  — max across k directions
-            'delta_W_computed': bool — False if layer had no LoRA (base model)
-
-    NOTE: This function never modifies the official metric formula. It only
-    adds per-direction diagnostics.
-    """
+    safety_directions: dict[str, torch.Tensor],
+) -> dict[str, dict]:
+    """Diagnostic extension of compute_subspace_alignment."""
     results = {}
+    named_modules = dict(model.named_modules())
 
-    for layer_idx, directions in safety_directions.items():
+    for key, directions in safety_directions.items():
         k = directions.shape[1]
         result = {
             "official": 0.0,
@@ -409,35 +380,37 @@ def compute_subspace_alignment_full(
         }
 
         try:
-            q_proj = model.base_model.model.model.layers[layer_idx].self_attn.q_proj
+            target_module = None
+            for name, mod in named_modules.items():
+                if key in name and hasattr(mod, "lora_A"):
+                    target_module = mod
+                    break
+            
+            if target_module is not None:
+                lora_A = target_module.lora_A["default"].weight.detach().to(torch.float32)
+                lora_B = target_module.lora_B["default"].weight.detach().to(torch.float32)
+                scaling = target_module.scaling.get("default", 1.0)
+                
+                delta_W = (lora_B @ lora_A) * scaling
 
-            lora_A = q_proj.lora_A.default.weight.detach().to(torch.float32)
-            lora_B = q_proj.lora_B.default.weight.detach().to(torch.float32)
-            delta_W = lora_B @ lora_A
+                _, _, Vh = torch.linalg.svd(delta_W, full_matrices=False)
+                top_right_vector = Vh[0]  
 
-            _, _, Vh = torch.linalg.svd(delta_W, full_matrices=False)
-            top_right_vector = Vh[0]  # [d_model]
+                per_dir = []
+                for j in range(k):
+                    dir_j = directions[:, j].to(torch.float32).to(top_right_vector.device)
+                    align_j = torch.abs(torch.dot(top_right_vector, dir_j)).item()
+                    per_dir.append(align_j)
 
-            per_dir = []
-            for j in range(k):
-                dir_j = directions[:, j].to(torch.float32).to(top_right_vector.device)
-                align_j = torch.abs(torch.dot(top_right_vector, dir_j)).item()
-                per_dir.append(align_j)
+                result["official"] = per_dir[0]   
+                result["per_dir"] = per_dir
+                result["mean_k"] = float(sum(per_dir) / k)
+                result["max_k"] = max(per_dir)
+                result["delta_W_computed"] = True
 
-            result["official"] = per_dir[0]   # identical to compute_subspace_alignment
-            result["per_dir"] = per_dir
-            result["mean_k"] = float(sum(per_dir) / k)
-            result["max_k"] = max(per_dir)
-            result["delta_W_computed"] = True
-
-        except AttributeError:
-            # No LoRA on this model (e.g. base model before training)
-            pass
         except Exception as e:
-            logger.error(
-                f"compute_subspace_alignment_full: error at layer {layer_idx}: {e}"
-            )
+            logger.error(f"compute_subspace_alignment_full error at module {key}: {e}")
 
-        results[layer_idx] = result
+        results[key] = result
 
     return results
