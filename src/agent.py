@@ -340,7 +340,3 @@ def _log_failure(log_path: Optional[str], reason: str, response: Optional[str]):
             writer.writerow({"reason": reason, "response_snippet": (response or "")[:300]})
     except Exception as e:
         logger.error(f"Failed to write agent failure log: {e}")
-_snippet": (response or "")[:300],
-            })
-    except Exception as e:
-        logger.error(f"Failed to write agent failure log: {e}")

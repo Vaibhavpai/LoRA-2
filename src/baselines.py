@@ -165,3 +165,19 @@ def log_salora_stats(model):
         
     avg_ratio = sum(s["ratio"] for s in all_stats) / len(all_stats)
     logger.info(f"[SaLoRA Verification] Average safety norm ratio after projection: {avg_ratio:.6f} (Expected < 0.01)")
+
+def load_safety_directions(models_dir):
+    """
+    Loads the safety directions extracted in Phase 3.
+    Expects a flat dictionary mapping string module keys to tensors.
+    Returns (directions, metadata) where metadata is None for backwards compatibility.
+    """
+    import torch
+    from pathlib import Path
+    
+    path = Path(models_dir) / "safety_directions.pt"
+    if not path.exists():
+        raise FileNotFoundError(f"Missing {path}. Run Phase 3 first.")
+        
+    directions = torch.load(path, weights_only=True)
+    return directions, None

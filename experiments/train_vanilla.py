@@ -150,6 +150,34 @@ def set_seed(seed: int):
 # Main Runner
 # ===========================================================================
 
+def build_lora_model(model_id: str, device: str):
+    if torch.cuda.is_available():
+        if torch.cuda.get_device_capability()[0] >= 8:
+            model_dtype = torch.bfloat16
+        else:
+            model_dtype = torch.float16
+    else:
+        model_dtype = torch.float32
+    
+    base_model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        torch_dtype=model_dtype,
+        low_cpu_mem_usage=True
+    )
+
+    lora_config = LoraConfig(
+        r=16,
+        lora_alpha=32,
+        target_modules=["q_proj", "v_proj"],
+        lora_dropout=0.05,
+        bias="none",
+        task_type="CAUSAL_LM"
+    )
+    
+    model = get_peft_model(base_model, lora_config)
+    model.to(device)
+    return model
+
 def main():
     parser = argparse.ArgumentParser(description="Vanilla LoRA Training Runner")
     parser.add_argument("--task", type=str, required=True, choices=["gsm8k", "alpaca"],
@@ -211,36 +239,7 @@ def main():
 
     # 2. Load Base Model and Apply LoRA
     logger.info(f"Loading base model: {model_id}")
-    # On Kaggle T4/Colab, standard float16/bfloat16 fits well
-    if torch.cuda.is_available():
-        # Only use bfloat16 if the GPU natively supports it via hardware (Compute Capability 8.0+)
-        # Otherwise, even if PyTorch says it's "supported" via software emulation, it will be extremely slow.
-        if torch.cuda.get_device_capability()[0] >= 8:
-            model_dtype = torch.bfloat16
-        else:
-            model_dtype = torch.float16 # Force float16 for T4 (Compute 7.5) to use Tensor Cores
-    else:
-        model_dtype = torch.float32
-    
-    base_model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        torch_dtype=model_dtype,
-        low_cpu_mem_usage=True
-    )
-
-    lora_config = LoraConfig(
-        r=16,
-        lora_alpha=32,
-        target_modules=["q_proj", "v_proj"],
-        lora_dropout=0.05,
-        bias="none",
-        task_type="CAUSAL_LM"
-    )
-    
-    logger.info("Applying LoRA adapter to base model...")
-    model = get_peft_model(base_model, lora_config)
-    model.print_trainable_parameters()
-    model.to(device)
+    model = build_lora_model(model_id, device)
 
     # 3. Setup Optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)

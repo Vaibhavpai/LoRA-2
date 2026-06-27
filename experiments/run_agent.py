@@ -33,7 +33,7 @@ from src.metrics import (
     evaluate_safety, compute_subspace_alignment,
 )
 from src.baselines import load_safety_directions
-from experiments.run_baselines import MaskedTrainingDataset, training_collate_fn, set_seed, build_lora_model
+from experiments.train_vanilla import MaskedTrainingDataset, training_collate_fn, set_seed, build_lora_model
 
 # Phase 6 imports
 from src.constraint_applier import ConstraintApplier
@@ -169,7 +169,10 @@ def main():
                         if col_name in history[-1]:
                             lambda_state[l] = float(history[-1][col_name])
                             
-                    baseline_refusal_rate = history[0]["refusal_rate"]
+                    if "baseline_refusal_rate" in history[-1]:
+                        baseline_refusal_rate = float(history[-1]["baseline_refusal_rate"])
+                    else:
+                        baseline_refusal_rate = history[0]["refusal_rate"]
                     prev_refusal_rate = history[-1]["refusal_rate"]
                     refusal_history = [h["refusal_rate"] for h in history]
                     
@@ -339,6 +342,7 @@ def main():
                     "train_loss":  accumulated_loss / args.eval_every,
                     "refusal_rate": refusal_rate,
                     "refusal_rate_smoothed": smoothed_refusal,
+                    "baseline_refusal_rate": baseline_refusal_rate,
                     metric_name:   task_metric,
                     "mean_alignment": mean_align,
                 }
