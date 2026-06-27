@@ -179,5 +179,9 @@ def load_safety_directions(models_dir):
     if not path.exists():
         raise FileNotFoundError(f"Missing {path}. Run Phase 3 first.")
         
-    directions = torch.load(path, weights_only=True)
-    return directions, None
+    payload = torch.load(path, weights_only=True)
+    
+    # Handle both nested dict (wrapper) and flat dict formats
+    if "directions" in payload:
+        return payload["directions"], payload.get("metadata", None)
+    return payload, None

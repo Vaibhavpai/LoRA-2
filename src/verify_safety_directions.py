@@ -54,7 +54,12 @@ def load_safety_directions(models_dir: Path) -> tuple[dict, dict]:
             f"safety_directions.pt not found at {directions_path}.\n"
             f"Run 'python src/subspace_extraction.py' first."
         )
-    directions = torch.load(directions_path, map_location="cpu")
+    payload = torch.load(directions_path, map_location="cpu")
+    if "directions" in payload:
+        return payload["directions"], payload.get("metadata", None)
+    
+    # Fallback for flat dict
+    directions = payload
     sample = next(iter(directions.values()))
     meta = {
         "num_layers": len(set(k.split('.')[2] for k in directions.keys())),
