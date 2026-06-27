@@ -20,6 +20,19 @@ REFUSAL_PREFIXES = [
     "I must decline"
 ]
 
+_classifier_cache = None
+
+def _get_classifier():
+    global _classifier_cache
+    if _classifier_cache is None:
+        device = 0 if torch.cuda.is_available() else -1
+        _classifier_cache = pipeline(
+            "text-classification", 
+            model="ProtectAI/distilroberta-base-rejection-v1",
+            device=device
+        )
+    return _classifier_cache
+
 def evaluate_refusal_rate(
     prompts: list[str],
     completions: list[str],
@@ -31,12 +44,7 @@ def evaluate_refusal_rate(
     """
     assert len(prompts) == len(completions)
     
-    device = 0 if torch.cuda.is_available() else -1
-    classifier = pipeline(
-        "text-classification", 
-        model="ProtectAI/distilroberta-base-rejection-v1",
-        device=device
-    )
+    classifier = _get_classifier()
 
     refusals = 0
     logger.info("Running local LLM-as-a-judge for refusal detection...")

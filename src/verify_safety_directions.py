@@ -54,8 +54,16 @@ def load_safety_directions(models_dir: Path) -> tuple[dict, dict]:
             f"safety_directions.pt not found at {directions_path}.\n"
             f"Run 'python src/subspace_extraction.py' first."
         )
-    payload = torch.load(directions_path, map_location="cpu")
-    return payload["directions"], payload["metadata"]
+    directions = torch.load(directions_path, map_location="cpu")
+    sample = next(iter(directions.values()))
+    meta = {
+        "num_layers": len(set(k.split('.')[2] for k in directions.keys())),
+        "d_model": sample.shape[0],
+        "k": sample.shape[1],
+        "model_id": "Qwen/Qwen2.5-1.5B-Instruct",
+        "safe_prompt_type": "semantic_paraphrase",
+    }
+    return directions, meta
 
 
 def compute_mean_alignment(alignments: dict[int, float]) -> float:

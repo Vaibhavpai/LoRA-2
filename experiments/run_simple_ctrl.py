@@ -38,7 +38,7 @@ from src.metrics import evaluate_task_gsm8k, evaluate_task_alpaca, evaluate_safe
 from src.simple_controller import FeedbackController, ControllerConfig
 
 # We reuse the dataset formatting and collate logic from train_vanilla
-from experiments.train_vanilla import MaskedTrainingDataset, training_collate_fn, set_seed
+from experiments.train_vanilla import MaskedTrainingDataset, training_collate_fn, set_seed, build_lora_model
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -103,22 +103,7 @@ def main():
     )
 
     # 2. Load Base Model and Apply LoRA
-    if torch.cuda.is_available():
-        model_dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
-    else:
-        model_dtype = torch.float32
-        
-    base_model = AutoModelForCausalLM.from_pretrained(
-        model_id, torch_dtype=model_dtype, low_cpu_mem_usage=True
-    )
-
-    lora_config = LoraConfig(
-        r=16, lora_alpha=32, target_modules=["q_proj", "v_proj"],
-        lora_dropout=0.05, bias="none", task_type="CAUSAL_LM"
-    )
-    
-    model = get_peft_model(base_model, lora_config)
-    model.to(device)
+    model = build_lora_model(model_id, device)
 
     # --- Phase 5: Initialize the FeedbackController ---
     ctrl_config = ControllerConfig(

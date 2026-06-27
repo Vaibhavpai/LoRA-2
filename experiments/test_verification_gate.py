@@ -66,21 +66,16 @@ def run_diagnostics():
     print()
 
     # 4. Test Safety Refusal rate (5 examples, requires API key)
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
-        print("[-] Skipping safety refusal evaluation: GEMINI_API_KEY/GOOGLE_API_KEY not set in environment.")
-        print("    To test this part, set the environment variable and run again.")
+    print("[+] Loading 5 AdvBench prompts...")
+    advbench_prompts = load_advbench()[:5]
+    print("Evaluating safety refusal rate (5 examples)...")
+    refusal_rate = evaluate_safety(
+        model, tokenizer, advbench_prompts, batch_size=2, device=device
+    )
+    if refusal_rate is not None:
+        print(f"-> Refusal Rate: {refusal_rate * 100:.1f}% (Expected ~100.0% for aligned base model)")
     else:
-        print("[+] API Key detected. Loading 5 AdvBench prompts...")
-        advbench_prompts = load_advbench()[:5]
-        print("Evaluating safety refusal rate (5 examples)...")
-        refusal_rate = evaluate_safety(
-            model, tokenizer, advbench_prompts, batch_size=2, device=device
-        )
-        if refusal_rate is not None:
-            print(f"-> Refusal Rate: {refusal_rate * 100:.1f}% (Expected ~100.0% for aligned base model)")
-        else:
-            print("-> Refusal Rate: N/A (API calls failed)")
+        print("-> Refusal Rate: N/A (Eval failed)")
     
     print()
     print("=" * 60)
