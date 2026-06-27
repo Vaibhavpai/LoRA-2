@@ -419,11 +419,13 @@ def run_salora(args, project_root: Path):
                 )
 
                 # Save progress to CSV immediately
-                pd.DataFrame(history).to_csv(csv_path, index=False)
+                if accelerator.is_main_process:
+                    pd.DataFrame(history).to_csv(csv_path, index=False)
 
-                # Save checkpoint
-                ckpt_dir = adapter_save_dir / f"checkpoint-{current_step}"
-                model.save_pretrained(ckpt_dir)
+                # Save checkpoint (only on main process)
+                if accelerator.is_main_process:
+                    ckpt_dir = adapter_save_dir / f"checkpoint-{current_step}"
+                    accelerator.unwrap_model(model).save_pretrained(ckpt_dir)
 
                 accumulated_loss = 0.0
 
@@ -433,7 +435,8 @@ def run_salora(args, project_root: Path):
     # 6. Save final adapter and clean up
     # -------------------------------------------------------------------
     adapter_save_dir.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(adapter_save_dir)
+    if accelerator.is_main_process:
+        accelerator.unwrap_model(model).save_pretrained(adapter_save_dir)
 
     # Remove hooks (cleanup)
     hook_manager.remove_hooks()

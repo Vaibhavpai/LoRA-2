@@ -202,13 +202,15 @@ def main():
                 df.to_csv(csv_path, index=False)
                 
                 checkpoint_dir = adapter_save_dir / f"checkpoint-{current_step}"
-                model.save_pretrained(checkpoint_dir)
+                if accelerator.is_main_process:
+                    accelerator.unwrap_model(model).save_pretrained(checkpoint_dir)
                 
                 accumulated_loss = 0.0
 
             step += 1
 
-    model.save_pretrained(adapter_save_dir)
+    if accelerator.is_main_process:
+        accelerator.unwrap_model(model).save_pretrained(adapter_save_dir)
     logger.info(f"Training complete. Adapter saved to {adapter_save_dir}")
 
 if __name__ == "__main__":
