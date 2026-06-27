@@ -30,6 +30,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model
+from accelerate import Accelerator
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
@@ -183,6 +184,11 @@ def run_salora(args, project_root: Path):
     logger.info("SaLoRA — Safety-Alignment Preserved LoRA (Baseline 3)")
     logger.info("=" * 60)
 
+    # --- Multi-GPU setup with Accelerate ---
+    accelerator = Accelerator()
+    device = accelerator.device
+    logger.info(f"Accelerate: using {accelerator.num_processes} process(es), device: {device}")
+
     set_seed(args.seed)
 
     models_dir  = project_root / "models"
@@ -192,7 +198,6 @@ def run_salora(args, project_root: Path):
     csv_path         = results_dir / f"salora_{args.task}_seed{args.seed}.csv"
     adapter_save_dir = models_dir / f"salora_{args.task}_seed{args.seed}"
 
-    device   = "cuda" if torch.cuda.is_available() else "cpu"
     model_id = "Qwen/Qwen2.5-1.5B-Instruct"
     logger.info(f"Device: {device}")
 
@@ -227,7 +232,7 @@ def run_salora(args, project_root: Path):
 
     base_model_for_extraction = AutoModelForCausalLM.from_pretrained(
         model_id, torch_dtype=dtype, low_cpu_mem_usage=True
-    ).to(device)
+    ).to(accelerator.device)
 
     # Load harmful prompts for direction extraction (70% of 520 = 364)
     harmful_for_extraction = load_advbench()[:364]
@@ -238,7 +243,7 @@ def run_salora(args, project_root: Path):
         harmful_prompts=harmful_for_extraction,
         target_modules=("q_proj", "v_proj"),
         r_s=32,
-        device=device,
+        device=str(accelerator.device),
         max_prompts=364,
     )
     logger.info(f"Extracted {len(per_layer_directions)} per-layer direction sets")
@@ -268,7 +273,7 @@ def run_salora(args, project_root: Path):
     # -------------------------------------------------------------------
     # 3. Build model with LoRA
     # -------------------------------------------------------------------
-    model = build_lora_model(model_id, device)
+    model = build_lora_model(model_id, str(accelerator.device))
 
     # -------------------------------------------------------------------
     # 4. Set up paper-accurate SaLoRA (3 components)
@@ -279,11 +284,11 @@ def run_salora(args, project_root: Path):
     # -------------------------------------------------------------------
     logger.info("Setting up paper-accurate SaLoRA...")
     hook_manager = setup_salora(
-        model, per_layer_directions, device
+        model, per_layer_directions, str(accelerator.device)
     )
 
     # Verify hooks are working
-    hooks_ok = verify_salora_active(model, tokenizer, hook_manager, device)
+    hooks_ok = verify_salora_active(model, tokenizer, hook_manager, str(accelerator.device))
     if not hooks_ok:
         logger.warning(
             "SaLoRA hooks verification failed! Hooks may not be modifying "
@@ -294,6 +299,11 @@ def run_salora(args, project_root: Path):
     # 5. Training loop (identical structure to vanilla + SaLoRA hooks)
     # -------------------------------------------------------------------
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+
+    # Prepare for multi-GPU training
+    model, optimizer, train_loader = accelerator.prepare(
+        model, optimizer, train_loader
+    )
 
     grad_accumulation_steps = 4
     total_steps  = args.steps
@@ -341,7 +351,7 @@ def run_salora(args, project_root: Path):
             labels=labels
         )
         loss = outputs.loss / grad_accumulation_steps
-        loss.backward()
+        accelerator.backward(loss)
 
         accumulated_loss += loss.item() * grad_accumulation_steps
         running_loss     += loss.item() * grad_accumulation_steps
@@ -368,19 +378,19 @@ def run_salora(args, project_root: Path):
                 # Evaluate safety (refusal rate)
                 refusal_rate = evaluate_safety(
                     model, tokenizer, advbench_prompts,
-                    batch_size=4, device=device
+                    batch_size=4, device=str(accelerator.device)
                 )
 
                 # Evaluate task capability
                 if args.task == "gsm8k":
                     task_metric = evaluate_task_gsm8k(
                         model, tokenizer, eval_data,
-                        batch_size=4, device=device
+                        batch_size=4, device=str(accelerator.device)
                     )
                 else:
                     task_metric = evaluate_task_alpaca(
                         model, tokenizer, eval_data,
-                        batch_size=4, device=device
+                        batch_size=4, device=str(accelerator.device)
                     )
 
                 # Subspace alignment

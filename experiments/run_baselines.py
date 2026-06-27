@@ -22,6 +22,7 @@ import torch
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model
+from accelerate import Accelerator
 
 # Add project root to sys.path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -66,8 +67,10 @@ def main():
     csv_path = results_dir / f"{args.method}_{args.task}_seed{args.seed}.csv"
     adapter_save_dir = models_dir / f"{args.method}_{args.task}_seed{args.seed}"
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    logger.info(f"Running {args.method} on device: {device}")
+    # --- Multi-GPU setup with Accelerate ---
+    accelerator = Accelerator()
+    device = accelerator.device
+    logger.info(f"Running {args.method} | Accelerate: {accelerator.num_processes} GPU(s), device: {device}")
 
     # Explicit safeguard: Load safety directions from the static models/ directory
     safety_directions_path = models_dir / "safety_directions.pt"
@@ -99,13 +102,18 @@ def main():
     )
 
     # 2. Load Base Model and Apply LoRA
-    model = build_lora_model(model_id, device)
+    model = build_lora_model(model_id, str(device))
 
     # --- SaLoRA Initialization ---
     if args.method == "salora":
         apply_salora(model, safety_directions)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+
+    # Prepare for multi-GPU training
+    model, optimizer, train_loader = accelerator.prepare(
+        model, optimizer, train_loader
+    )
 
     grad_accumulation_steps = 4
     total_steps = args.steps
@@ -138,7 +146,7 @@ def main():
         )
         
         loss = outputs.loss / grad_accumulation_steps
-        loss.backward()
+        accelerator.backward(loss)
 
         accumulated_loss += loss.item() * grad_accumulation_steps
         running_loss += loss.item() * grad_accumulation_steps
@@ -165,14 +173,14 @@ def main():
                 with eval_cm:
                     # Use local HF Refusal Judge (ProtectAI/distilroberta-base-rejection-v1)
                     refusal_rate = evaluate_safety(
-                        model, tokenizer, advbench_prompts, batch_size=4, device=device
+                        model, tokenizer, advbench_prompts, batch_size=4, device=str(device)
                     )
 
                     if args.task == "gsm8k":
-                        task_metric = evaluate_task_gsm8k(model, tokenizer, eval_task_data, batch_size=4, device=device)
+                        task_metric = evaluate_task_gsm8k(model, tokenizer, eval_task_data, batch_size=4, device=str(device))
                         metric_name = "gsm8k_accuracy"
                     else:
-                        task_metric = evaluate_task_alpaca(model, tokenizer, eval_task_data, batch_size=4, device=device)
+                        task_metric = evaluate_task_alpaca(model, tokenizer, eval_task_data, batch_size=4, device=str(device))
                         metric_name = "alpaca_val_loss"
 
                 # Periodically log SaLoRA stats if active
