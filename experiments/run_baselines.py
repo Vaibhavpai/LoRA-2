@@ -163,29 +163,32 @@ def main():
 
             if current_step % eval_every == 0:
                 logger.info(f"--- Running Evaluation at Step {current_step} ---")
-                
+
+                # Unwrap DDP model for evaluation (needed for .generate())
+                unwrapped_model = accelerator.unwrap_model(model)
+
                 # --- SafeLoRA Evaluation Logic ---
                 if args.method == "safelora":
-                    eval_cm = safelora_eval_context(model, safety_directions)
+                    eval_cm = safelora_eval_context(unwrapped_model, safety_directions)
                 else:
                     eval_cm = contextlib.nullcontext()
                     
                 with eval_cm:
                     # Use local HF Refusal Judge (ProtectAI/distilroberta-base-rejection-v1)
                     refusal_rate = evaluate_safety(
-                        model, tokenizer, advbench_prompts, batch_size=4, device=str(device)
+                        unwrapped_model, tokenizer, advbench_prompts, batch_size=4, device=str(device)
                     )
 
                     if args.task == "gsm8k":
-                        task_metric = evaluate_task_gsm8k(model, tokenizer, eval_task_data, batch_size=4, device=str(device))
+                        task_metric = evaluate_task_gsm8k(unwrapped_model, tokenizer, eval_task_data, batch_size=4, device=str(device))
                         metric_name = "gsm8k_accuracy"
                     else:
-                        task_metric = evaluate_task_alpaca(model, tokenizer, eval_task_data, batch_size=4, device=str(device))
+                        task_metric = evaluate_task_alpaca(unwrapped_model, tokenizer, eval_task_data, batch_size=4, device=str(device))
                         metric_name = "alpaca_val_loss"
 
                 # Periodically log SaLoRA stats if active
                 if args.method == "salora":
-                    log_salora_stats(model)
+                    log_salora_stats(unwrapped_model)
 
                 record = {
                     "step": current_step,

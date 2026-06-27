@@ -375,27 +375,30 @@ def run_salora(args, project_root: Path):
                     f"--- Eval at Step {current_step} ---"
                 )
 
+                # Unwrap DDP model for evaluation (needed for .generate())
+                unwrapped_model = accelerator.unwrap_model(model)
+
                 # Evaluate safety (refusal rate)
                 refusal_rate = evaluate_safety(
-                    model, tokenizer, advbench_prompts,
+                    unwrapped_model, tokenizer, advbench_prompts,
                     batch_size=4, device=str(accelerator.device)
                 )
 
                 # Evaluate task capability
                 if args.task == "gsm8k":
                     task_metric = evaluate_task_gsm8k(
-                        model, tokenizer, eval_data,
+                        unwrapped_model, tokenizer, eval_data,
                         batch_size=4, device=str(accelerator.device)
                     )
                 else:
                     task_metric = evaluate_task_alpaca(
-                        model, tokenizer, eval_data,
+                        unwrapped_model, tokenizer, eval_data,
                         batch_size=4, device=str(accelerator.device)
                     )
 
                 # Subspace alignment
                 alignments = compute_subspace_alignment(
-                    model, safety_directions
+                    unwrapped_model, safety_directions
                 )
                 mean_align = sum(alignments.values()) / len(alignments)
 
