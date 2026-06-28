@@ -30,11 +30,14 @@ class ConstraintApplier:
         self.model = model
         self.device = device
 
-        self.module_keys = list(safety_directions.keys())
+        # Only use actual module keys (skip metadata)
+        self.module_keys = [k for k in safety_directions.keys() if k != "metadata"]
         self.lambdas = {k: initial_lambda for k in self.module_keys}
 
         self.proj_matrices = {}
         for key, U_l in safety_directions.items():
+            if key == "metadata":
+                continue
             U = U_l.to(torch.float32).to(device)
             P_l = (U @ U.T).detach().requires_grad_(False)
             self.proj_matrices[key] = P_l
@@ -46,17 +49,9 @@ class ConstraintApplier:
             self.lambdas[key] = max(0.0, min(1.0, value))
 
     def set_all_lambdas(self, lambda_dict: dict):
-        # Allow nested dicts e.g. {"layer_0": {"q_proj": 0.1}} or flat dicts
         for key, value in lambda_dict.items():
-            if isinstance(value, dict):
-                for sub_key, sub_value in value.items():
-                    # Attempt to match string
-                    for actual_key in self.module_keys:
-                        if key in actual_key and sub_key in actual_key:
-                            self.set_lambda(actual_key, float(sub_value))
-            else:
-                if key in self.lambdas:
-                    self.set_lambda(key, float(value))
+            if key in self.lambdas:
+                self.set_lambda(key, float(value))
 
     def get_lambdas(self) -> dict:
         return dict(self.lambdas)
