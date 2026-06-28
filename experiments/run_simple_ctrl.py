@@ -22,7 +22,7 @@ import contextlib
 import torch
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, PeftModel
 
 # Add project root to sys.path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
@@ -56,6 +56,10 @@ def main():
     parser.add_argument("--threshold_low", type=float, default=0.85, help="Increase alpha if refusal drops below this")
     parser.add_argument("--threshold_high", type=float, default=0.95, help="Decrease alpha if refusal rises above this")
     parser.add_argument("--delta", type=float, default=0.05, help="Step size for alpha increments")
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None,
+                        help="Path to checkpoint directory to resume from (e.g. models/simplectrl_gsm8k_seed42/checkpoint-1900)")
+    parser.add_argument("--resume_step", type=int, default=0,
+                        help="Training step number at which the checkpoint was saved (e.g. 1900)")
     
     args = parser.parse_args()
 
@@ -102,8 +106,20 @@ def main():
         generator=generator
     )
 
-    # 2. Load Base Model and Apply LoRA
-    model = build_lora_model(model_id, device)
+    # 2. Load Base Model and Apply LoRA (or resume from checkpoint)
+    if args.resume_from_checkpoint:
+        ckpt_path = Path(args.resume_from_checkpoint)
+        assert ckpt_path.exists(), f"Checkpoint not found: {ckpt_path}"
+        logger.info(f"Resuming from checkpoint: {ckpt_path}")
+        if torch.cuda.is_available():
+            model_dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+        else:
+            model_dtype = torch.float32
+        base_model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=model_dtype, low_cpu_mem_usage=True)
+        model = PeftModel.from_pretrained(base_model, str(ckpt_path), is_trainable=True)
+        model.to(device)
+    else:
+        model = build_lora_model(model_id, device)
 
     # --- Phase 5: Initialize the FeedbackController ---
     ctrl_config = ControllerConfig(
@@ -119,13 +135,31 @@ def main():
     total_steps = args.steps
     eval_every = args.eval_every
     
-    history = []
-    step = 0
+    # Keep track of training stats — pre-load history if resuming
+    if args.resume_from_checkpoint and csv_path.exists():
+        history = pd.read_csv(csv_path).to_dict("records")
+        logger.info(f"Loaded {len(history)} existing history records from {csv_path}")
+    else:
+        history = []
+
+    step = args.resume_step
     epoch = 0
     running_loss = 0.0
     accumulated_loss = 0.0
-    batch_idx = 0
+    batch_idx = step * grad_accumulation_steps
     data_iter = iter(train_loader)
+
+    # Fast-forward data loader to resume position
+    if args.resume_step > 0:
+        logger.info(f"Fast-forwarding data loader by {args.resume_step * grad_accumulation_steps} batches...")
+        for _ in range(args.resume_step * grad_accumulation_steps):
+            try:
+                next(data_iter)
+            except StopIteration:
+                epoch += 1
+                train_loader.generator.manual_seed(args.seed + epoch)
+                data_iter = iter(train_loader)
+        logger.info(f"Data loader ready. Resuming from step {args.resume_step}.")
 
     model.zero_grad()
 
