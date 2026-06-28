@@ -43,7 +43,6 @@ HOW GRADIENT CONSTRAINT WORKS (56-PARAMETER MODULE):
 - Constraint formula: ΔW_safe = ΔW - λ × (ΔW @ P)
 - Higher subspace alignment score = that module drifts more = needs higher λ
 - IMPORTANT: λ values AUTO-DECAY by 2% each checkpoint toward 0. If you don't actively set a module's λ, it gradually returns toward 0. This is intentional — you must justify maintaining high constraints.
-- NOTE: λ is capped at 0.90 for most modules. Only the top-5 modules by alignment score can reach up to 1.0.
 
 STRATEGY PRINCIPLES:
 1. USE SMOOTHED REFUSAL (3-step average) for decisions, NOT raw refusal. Raw refusal has ±10% noise from small sample evaluation.
@@ -153,7 +152,7 @@ def format_observation(
         
         # Make key more readable in the prompt
         short_key = key.split("layers.")[-1] if "layers." in key else key
-        lines.append(f"  Module {key} | align={align:.4f} | λ={lam:.3f}  [{flag}]")
+        lines.append(f"  Module {short_key} | align={align:.4f} | λ={lam:.3f}  [{flag}]")
 
     def parse_layer(k):
         m = re.search(r'layers\.(\d+)', k)
@@ -287,7 +286,9 @@ def parse_agent_response(
     new_lambda_state = dict(current_lambda_state)
 
     for key, val in raw_constraints.items():
-        if key not in valid_layer_ids:
+        # Allow substring matching in case the agent outputs a short key or partial key
+        matched_ids = [v_id for v_id in valid_layer_ids if key == v_id or key in v_id]
+        if not matched_ids:
             logger.warning(f"Module {key} not in model — skipping.")
             continue
 
@@ -298,25 +299,11 @@ def parse_agent_response(
             continue
 
         LAMBDA_FLOOR = 0.0
-        LAMBDA_CAP_DEFAULT = 0.90
-        LAMBDA_CAP_TOP = 1.0
-        TOP_N = 5
+        LAMBDA_CAP = 1.0
+        clamped = max(LAMBDA_FLOOR, min(LAMBDA_CAP, lam))
         
-        layer_cap = LAMBDA_CAP_DEFAULT
-        if alignments:
-            sorted_by_align = sorted(
-                alignments.items(),
-                key=lambda x: float(x[1]),
-                reverse=True,
-            )
-            top_layer_ids = {k for k, _ in sorted_by_align[:TOP_N]}
-            if key in top_layer_ids:
-                layer_cap = LAMBDA_CAP_TOP
-        else:
-            layer_cap = LAMBDA_CAP_TOP
-        
-        clamped = max(LAMBDA_FLOOR, min(layer_cap, lam))
-        new_lambda_state[key] = clamped
+        for matched_id in matched_ids:
+            new_lambda_state[matched_id] = clamped
 
     rationale = str(parsed.get("rationale", "No rationale provided."))[:300]
     predicted_outcome = str(parsed.get("predicted_outcome", "Not specified."))[:200]
