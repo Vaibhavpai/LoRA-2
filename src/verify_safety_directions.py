@@ -276,6 +276,15 @@ def main():
     # Diagnostic: multi-direction for fine-tuned model
     finetuned_full = compute_subspace_alignment_full(finetuned_model, safety_directions)
 
+    import re
+    def remap(d):
+        return {int(re.search(r'layers\.(\d+)', k).group(1)): v 
+                for k, v in d.items() if "q_proj" in k and re.search(r'layers\.(\d+)', k)}
+
+    base_alignments = remap(base_alignments)
+    finetuned_alignments = remap(finetuned_alignments)
+    finetuned_full = remap(finetuned_full)
+
     # -----------------------------------------------------------------------
     # Official alignment table (paper-reportable)
     # -----------------------------------------------------------------------
