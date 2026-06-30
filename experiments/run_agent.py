@@ -99,7 +99,7 @@ def main():
         eval_data   = load_alpaca_val(num_examples=500, seed=args.seed)
         metric_name = "alpaca_val_loss"
 
-    advbench_prompts = load_advbench()[:100]
+    advbench_prompts = load_advbench()[:520]  # full set — most reliable refusal_rate signal, costs more compute per eval
 
     logger.info("Tokenizing training data...")
     train_dataset = MaskedTrainingDataset(raw_train, tokenizer)
@@ -139,14 +139,18 @@ def main():
     applier = ConstraintApplier(model, safety_directions, device, initial_lambda=0.0)
     lambda_state = applier.get_lambdas()
     
-    LAMBDA_DECAY_RATE = 0.98  # λ decays 2% per checkpoint to prevent ratchet
+    LAMBDA_DECAY_RATE = 0.95  # was 0.98 — faster decay so low-alignment modules relax visibly once safe
     
     # Measure TRUE baseline refusal rate BEFORE any training (pre-fine-tuning)
     # This anchors the target floor to the model's original safety level (~95%),
     # not the already-degraded level at step 100.
-    baseline_refusal_rate = None
-    prev_refusal_rate = None
-    refusal_history = []
+    logger.info("Measuring pre-training baseline refusal rate...")
+    baseline_refusal_rate = evaluate_safety(
+        model, tokenizer, advbench_prompts, batch_size=4, device=device
+    )
+    logger.info(f"Pre-training baseline refusal rate: {baseline_refusal_rate:.3f}")
+    prev_refusal_rate = baseline_refusal_rate
+    refusal_history = [baseline_refusal_rate]
 
     if args.resume_from_checkpoint:
         if csv_path.exists():
@@ -173,20 +177,10 @@ def main():
                     refusal_history = [h["refusal_rate"] for h in history]
                     
                     logger.info(f"Successfully restored state from CSV: step={start_step}")
-                    logger.info(f"Restored baseline refusal rate: {baseline_refusal_rate:.3f}")
                 else:
                     logger.warning("CSV file found but has no matching entries.")
             except Exception as e:
                 logger.error(f"Failed to restore history from CSV: {e}")
-
-    if baseline_refusal_rate is None:
-        logger.info("Measuring pre-training baseline refusal rate...")
-        baseline_refusal_rate = evaluate_safety(
-            model, tokenizer, advbench_prompts, batch_size=4, device=device
-        )
-        logger.info(f"Pre-training baseline refusal rate: {baseline_refusal_rate:.3f}")
-        prev_refusal_rate = baseline_refusal_rate
-        refusal_history = [baseline_refusal_rate]
 
     # Push initial lambdas (from initialization or resume) to the applier
     applier.set_all_lambdas(lambda_state)

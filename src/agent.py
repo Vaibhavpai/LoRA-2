@@ -1,5 +1,5 @@
 """
-agent.py — Phase 6, Steps 6.2–6.3
+agent.py — Phase 6, Steps 6.2-6.3
 ====================================
 LLM-based training controller for LoRA-SafeLoop (56-Key Version).
 """
@@ -49,9 +49,10 @@ STRATEGY PRINCIPLES:
 2. TARGET MODULES SELECTIVELY: The agent's advantage over static methods is PRECISION. Set λ=0 on modules with near-zero alignment, and concentrate constraint on the few modules with high alignment.
 3. ACTIVELY REDUCE λ WHEN SAFE: If smoothed refusal is ABOVE the target floor, you MUST actively lower λ on modules with low/medium alignment to boost task learning.
 4. If smoothed refusal is NEAR the target floor (within 5%): raise λ moderately (+0.10 to +0.20) on the top-5 alignment modules.
-5. If smoothed refusal is BELOW the target floor: raise λ aggressively on the top-10 alignment modules (to 0.7-0.9).
+5. If smoothed refusal is BELOW the target floor: raise λ AGGRESSIVELY on the top-10 alignment modules — jump by +0.25 to +0.40 per checkpoint, not +0.10. The goal is to reach λ=0.7-0.9 on these modules WITHIN THE FIRST 500 STEPS (5 checkpoints), not gradually over the full run. A slow ramp wastes training time at insufficient constraint.
 6. Learn from reflexion memory: if raising λ uniformly produced DEGRADATION, the drift is in directions P doesn't capture, or you constrained the wrong modules.
 7. Make PROPORTIONAL adjustments. Modules with alignment >0.1 should have higher λ. Modules with alignment <0.02 can stay at λ=0.
+8. STABILITY CHECK: If smoothed refusal has been within the target band for 2+ consecutive checkpoints, HOLD λ steady (no further increases) even if you could still raise it. Constant upward adjustment without ever stabilizing is a failure mode — the goal is to find and HOLD an equilibrium, not perpetually climb.
 
 CRITICAL RULES:
 - You only need to specify modules you want to CHANGE. Unspecified modules keep current λ (after auto-decay).
