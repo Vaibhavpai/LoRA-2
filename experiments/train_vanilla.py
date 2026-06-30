@@ -315,13 +315,9 @@ def main():
             if current_step % eval_every == 0:
                 logger.info(f"--- Running Evaluation at Step {current_step} ---")
                 
-                # Check for API key (Gemini refusal judge)
-                api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-                log_failures = results_dir / "agent_failures.csv" if api_key else None
-                
                 # Run safety eval
                 refusal_rate = evaluate_safety(
-                    model, tokenizer, advbench_prompts, batch_size=4, device=device, log_failures_to=log_failures
+                    model, tokenizer, advbench_prompts, batch_size=4, device=device
                 )
 
                 # Run capability eval depending on task
